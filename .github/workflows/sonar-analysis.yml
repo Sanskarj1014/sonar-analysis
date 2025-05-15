@@ -1,0 +1,96 @@
+name: SonarQube Code Analysis
+
+on:
+  #pull_request:
+  #  branches:
+  #    - develop
+  #  types:
+  #    - opened
+  #    - synchronize
+  #    - reopened
+  #workflow_dispatch:  # Allows manual trigger
+  workflow_call:
+    inputs:
+      projectKey:
+        required: true
+        type: string
+      prAnalysisFeatureBranch:
+        required: false
+        type: string
+        default: 'false'  # Default to running for all branches
+      skipTests:               
+        required: false
+        type: string
+        default: 'false' #Default to running tests
+    secrets:
+      SONAR_TOKEN:
+        required: true
+      AWS_ACCOUNT_ID:
+        required: true
+      ENV_DECRYPT_KEY:
+        required: true
+      
+jobs:
+  sonar:
+    if: ${{ inputs.prAnalysisFeatureBranch == 'false' || (inputs.prAnalysisFeatureBranch == 'true' && startsWith(github.head_ref, 'feature/')) }}
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/GitHubActionNFRAccessRole
+          aws-region: us-east-1
+
+      - name: Authenticate with AWS CodeArtifact
+        run: |
+          export CODEARTIFACT_AUTH_TOKEN=$(aws codeartifact get-authorization-token --domain demo --domain-owner ${{ secrets.AWS_ACCOUNT_ID }} --query authorizationToken --output text)
+          
+          aws codeartifact login --tool npm --repository node --domain demo --domain-owner ${{ secrets.AWS_ACCOUNT_ID }} --region us-east-1
+
+          echo "@gwl:registry=https://demo-${{ secrets.AWS_ACCOUNT_ID }}.d.codeartifact.us-east-1.amazonaws.com/npm/node/" > ~/.npmrc
+          echo "//demo-${{ secrets.AWS_ACCOUNT_ID }}.d.codeartifact.us-east-1.amazonaws.com/npm/node/:_authToken=$CODEARTIFACT_AUTH_TOKEN" >> ~/.npmrc
+          echo "AWS CodeArtifact Authentication Configured"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          
+      - name: Install Dependencies
+        run: npm install
+
+      - name: Decrypt .env.enc if exists
+        run: |
+          if [ -f "./.env.enc" ] && [ -x "./scripts/seal-env.sh" ]; then
+            cd scripts
+            chmod +x seal-env.sh
+            ./seal-env.sh decrypt "${{ secrets.ENV_DECRYPT_KEY }}"
+            cd ..
+          else
+            echo "No .env.enc or seal-env.sh script found. Skipping decryption."
+          fi
+      
+      - name: Run tests
+        if: ${{ inputs.skipTests != 'true' }} # Only run tests if skipTests is not set to 'true'  
+        run: npm run test
+
+      - name: Run SonarQube Scanner
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: "https://sonarqube.io"
+        run: |
+          npm install -g sonarqube-scanner
+          sonar-scanner \
+            -Dsonar.projectKey=${{ inputs.projectKey }} \
+            -Dsonar.host.url=$SONAR_HOST_URL \
+            -Dsonar.token=$SONAR_TOKEN #\
+            #-Dsonar.pullrequest.key=${{ github.event.pull_request.number }} \
+            #-Dsonar.pullrequest.branch=${{ github.head_ref }} \
+            #-Dsonar.pullrequest.base=${{ github.base_ref }} \
+            #-Dsonar.pullrequest.github.repository=${{ github.repository }}
