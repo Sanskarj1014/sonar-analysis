@@ -8,7 +8,7 @@ on:
   #    - opened
   #    - synchronize
   #    - reopened
-  #workflow_dispatch:  # Allows manual trigger
+  workflow_dispatch:  # Allows manual trigger
   workflow_call:
     inputs:
       projectKey:
