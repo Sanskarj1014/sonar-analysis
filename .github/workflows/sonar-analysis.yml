@@ -1,96 +1,241 @@
-name: SonarQube Code Analysis
+name: Docker Build and Push
 
 on:
-  #pull_request:
-  #  branches:
-  #    - develop
-  #  types:
-  #    - opened
-  #    - synchronize
-  #    - reopened
-  workflow_dispatch:  # Allows manual trigger
-  workflow_call:
-    inputs:
-      projectKey:
-        required: true
-        type: string
-      prAnalysisFeatureBranch:
-        required: false
-        type: string
-        default: 'false'  # Default to running for all branches
-      skipTests:               
-        required: false
-        type: string
-        default: 'false' #Default to running tests
-    secrets:
-      SONAR_TOKEN:
-        required: true
-      AWS_ACCOUNT_ID:
-        required: true
-      ENV_DECRYPT_KEY:
-        required: true
-      
+  workflow_dispatch:
+
 jobs:
-  sonar:
-    if: ${{ inputs.prAnalysisFeatureBranch == 'false' || (inputs.prAnalysisFeatureBranch == 'true' && startsWith(github.head_ref, 'feature/')) }}
+  sonarQubeScan:
+    name: SonarQube Scan
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
+
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v1
+      - name: Checkout Code
+        uses: actions/checkout@v3
         with:
-          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/GitHubActionNFRAccessRole
-          aws-region: us-east-1
-
-      - name: Authenticate with AWS CodeArtifact
-        run: |
-          export CODEARTIFACT_AUTH_TOKEN=$(aws codeartifact get-authorization-token --domain demo --domain-owner ${{ secrets.AWS_ACCOUNT_ID }} --query authorizationToken --output text)
-          
-          aws codeartifact login --tool npm --repository node --domain demo --domain-owner ${{ secrets.AWS_ACCOUNT_ID }} --region us-east-1
-
-          echo "@gwl:registry=https://demo-${{ secrets.AWS_ACCOUNT_ID }}.d.codeartifact.us-east-1.amazonaws.com/npm/node/" > ~/.npmrc
-          echo "//demo-${{ secrets.AWS_ACCOUNT_ID }}.d.codeartifact.us-east-1.amazonaws.com/npm/node/:_authToken=$CODEARTIFACT_AUTH_TOKEN" >> ~/.npmrc
-          echo "AWS CodeArtifact Authentication Configured"
+          fetch-depth: 0  # Important for SonarQube to analyze all history
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v3
         with:
-          node-version: 18
-          
-      - name: Install Dependencies
+          node-version: '18'
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+  
+      - name: Verify Java version
+        run: java -version
+
+      - name: Install dependencies
         run: npm install
+  
+      - name: Build
+        run: npm run build
 
-      - name: Decrypt .env.enc if exists
+      # - name: Run app (start script)
+      #   run: npm start
+
+      - name: Upload Dependency Check Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-check-report
+          path: reports/dependency-check-report.xml
+
+      - name: Setup SonarQube Scanner
         run: |
-          if [ -f "./.env.enc" ] && [ -x "./scripts/seal-env.sh" ]; then
-            cd scripts
-            chmod +x seal-env.sh
-            ./seal-env.sh decrypt "${{ secrets.ENV_DECRYPT_KEY }}"
-            cd ..
-          else
-            echo "No .env.enc or seal-env.sh script found. Skipping decryption."
-          fi
-      
-      - name: Run tests
-        if: ${{ inputs.skipTests != 'true' }} # Only run tests if skipTests is not set to 'true'  
-        run: npm run test
+          mkdir -p $HOME/sonar
+          curl -sSLo $HOME/sonar/sonar-scanner.zip https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-5.0.1.3006-linux.zip
+          unzip -o $HOME/sonar/sonar-scanner.zip -d $HOME/sonar/
 
+      # - name: Run SonarQube Scan
+      #   env:
+      #     SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      #   run: |
+      #     $HOME/sonar/sonar-scanner-5.0.1.3006-linux/bin/sonar-scanner \
+      #       -Dsonar.projectKey=sanskar-test \
+      #       -Dsonar.sources=. \
+      #       -Dsonar.host.url=https://sonar.atg.galaxysofttech.co.in \
+      #       -Dsonar.token=$SONAR_TOKEN
       - name: Run SonarQube Scanner
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: "https://sonarqube.io"
+          SONAR_HOST_URL: "https://sonarcloud.io"
         run: |
-          npm install -g sonarqube-scanner
+          npm install -g sonar-scanner
           sonar-scanner \
-            -Dsonar.projectKey=${{ inputs.projectKey }} \
+            -Dsonar.projectKey=${{ secrets.PROJECT_KEY }} \
             -Dsonar.host.url=$SONAR_HOST_URL \
             -Dsonar.token=$SONAR_TOKEN #\
             #-Dsonar.pullrequest.key=${{ github.event.pull_request.number }} \
             #-Dsonar.pullrequest.branch=${{ github.head_ref }} \
             #-Dsonar.pullrequest.base=${{ github.base_ref }} \
             #-Dsonar.pullrequest.github.repository=${{ github.repository }}
+          
+      # Trivy
+      - name: Install Trivy
+        run: |
+            sudo apt-get update
+            sudo apt-get install wget apt-transport-https gnupg lsb-release -y
+            wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+            echo deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main | sudo tee -a /etc/apt/sources.list.d/trivy.list
+            sudo apt-get update
+            sudo apt-get install trivy -y
+
+      - name: Trivy FS Scan
+        run: trivy fs . > trivyfs.txt
+      
+      # Upload all reports
+      - name: Upload Scan Reports
+        uses: actions/upload-artifact@v4
+        with:
+            name: scan-reports
+            path: |
+                reports
+                trivyfs.txt
+                trivyimage.txt
+  docker:
+    runs-on: ubuntu-latest
+    env:
+      VERSION_TAG: ${{ github.run_number }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      # Set up Docker Buildx (optional but recommended for advanced builds)
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Log in to DockerHub
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+        #   password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Build Docker image
+      # - name: Build Docker image
+      #   run: |
+      #     -f Dockerfile.prod \
+      #     docker build --build-arg TMDB_V3_API_KEY=${{ secrets.TMDB_V3_API_KEY }}/ -t netflix .
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            -f Dockerfile.prod \
+            --build-arg TMDB_V3_API_KEY=${{ secrets.TMDB_V3_API_KEY }} \
+            -t netflix .
+
+      # Tag & Push Docker image
+      # - name: Tag and Push image
+      #   run: |
+      #     docker tag netflix ${{ secrets.DOCKER_USERNAME }}/netflix:latest
+      #     docker push ${{ secrets.DOCKER_USERNAME }}/netflix:latest
+
+      # - name: Tag and push image to Docker Hub
+        # run: |
+        #   docker tag netflix:${{ env.VERSION_TAG }} ${{ secrets.DOCKER_USERNAME }}/netflix:${{ env.VERSION_TAG }}
+        #   docker push ${{ secrets.DOCKER_USERNAME }}/netflix:${{ env.VERSION_TAG }}
+
+      - name: Tag and Push image
+        run: |
+          docker tag netflix ${{ secrets.DOCKER_USERNAME }}/netflix:${{ env.VERSION_TAG }}
+          docker push ${{ secrets.DOCKER_USERNAME }}/netflix:${{ env.VERSION_TAG }}
+
+      # Trivy image scan
+      - name: Trivy Image Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ secrets.DOCKER_USERNAME }}/netflix:latest
+          format: table
+          output: trivyimage.txt
+
+      - name: Upload Trivy Image Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-image-report
+          path: trivyimage.txt
+
+      # (Optional) Deploy container for testing
+      - name: Run Docker Container
+        run: |
+          docker run -d --name netflix -p 8081:80 ${{ secrets.DOCKER_USERNAME }}/netflix:latest
+
+  email-job:
+    runs-on: ubuntu-latest
+ 
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+ 
+    - name: Run a dummy job
+      run: echo "Simulating job..."
+ 
+    - name: Send Email Notification
+      uses: dawidd6/action-send-mail@v3
+      with:
+        server_address: smtp.gmail.com
+        server_port: 587
+        username: ${{ secrets.EMAIL_USERNAME }}
+        password: ${{ secrets.EMAIL_APP_PASSWORD }}
+        subject: GitHub Actions Build Notification
+        to: sanskar.jain@galaxyweblinks.in
+        from: ${{ secrets.EMAIL_USERNAME }}
+        body: |
+          ✅ Build completed!
+ 
+          🔹 Repository: ${{ github.repository }}
+          🔹 Branch: ${{ github.ref_name }}
+          🔹 Workflow: ${{ github.workflow }}
+          🔹 Run ID: ${{ github.run_id }}
+          🔹 Run URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+ 
+        attachments: |
+          ./trivyfs.txt
+          ./trivyimage.txt
+  build-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Node.js 16
+        uses: actions/setup-node@v3
+        with:
+          node-version: '16'
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          java-version: '17'
+          distribution: 'temurin' # or adopt / zulu depending on your preference
+
+      - name: Install Dependencies
+        run: npm install
+
+    #   - name: Build Project
+    #     run: npm run build
+
+      - name: Archive Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-artifacts
+          path: dist/
+
+      - name: Deploy / Run
+        run: |
+          echo "Starting the Application..."
+          npm install -g serve
+          nohup serve -s dist -l 3000 &
+          
+      - name: Success Message
+        if: success()
+        run: echo "Pipeline executed successfully!"
+
+      - name: Failure Message
+        if: failure()
+        run: echo "Pipeline failed!"
