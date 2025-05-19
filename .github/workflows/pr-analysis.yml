@@ -7,7 +7,7 @@ on:
 
 jobs:
   sonar-analysis:
-    uses: dandsltd/o2c-devops/.github/workflows/sonar-analysis.yaml@develop
+    uses: .github/workflows/sonar-analysis.yml@develop
     with:
       projectKey: o2c-report
       prAnalysisFeatureBranch: true
